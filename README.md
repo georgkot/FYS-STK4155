@@ -1,4 +1,4 @@
-# FYS-STK3155/4155 — Applied Data Analysis and Machine Learning (UiO, fall 2026)
+# FYS-STK3155/4155 - Applied Data Analysis and Machine Learning (UiO, fall 2026)
 
 Pietro Monacelli, Giorgio Spreafico, Elia Valenti, Georgios Kotrotsios
 
