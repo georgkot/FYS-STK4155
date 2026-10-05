@@ -1,0 +1,1421 @@
+% FYS-STK3155/4155, fall 2026 -- Project 1
+% Layout: course template (revtex, two columns). Files: main.tex, biblio.bib, Figures/
+% Compile: pdflatex main; bibtex main; pdflatex main; pdflatex main   (Overleaf: Recompile)
+%
+% \repourl is the address of the repository and \nbfile the file name of the notebook in it;
+% both are defined just below.
+\documentclass[aps,reprint,amsmath,amssymb,nofootinbib,floatfix]{revtex4-2}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[english]{babel}
+\usepackage{graphicx}
+\usepackage{bm}
+\usepackage{xcolor}
+\usepackage{listings}
+\usepackage[colorlinks=true,linkcolor=blue!55!black,citecolor=blue!55!black,urlcolor=blue!55!black]{hyperref}
+
+\newcommand{\todo}[1]{\textcolor{red}{[#1]}}
+\newcommand{\rr}{\raggedright\let\\\tabularnewline}   % ragged-right text in a table cell
+\newcommand{\repourl}{\url{https://github.com/georgkot/FYS-STK4155/tree/main/Project1}}
+\newcommand{\nbfile}{\texttt{Project1.ipynb}}
+
+\newcommand{\E}{\mathbb{E}}
+\newcommand{\lb}{\bar\lambda}
+\newcommand{\norm}[1]{\lVert #1\rVert}
+\DeclareMathOperator{\Var}{Var}
+\DeclareMathOperator{\Bias}{Bias}
+\DeclareMathOperator{\df}{df}
+\DeclareMathOperator{\sign}{sign}
+
+\lstset{language=Python, basicstyle=\ttfamily\footnotesize, columns=fullflexible, keepspaces=true,
+  showstringspaces=false, breaklines=true, frame=lines, framerule=0.4pt, aboveskip=6pt, belowskip=6pt,
+  captionpos=b, keywordstyle=\color{blue!55!black}}
+
+% float placement: at most two wide floats at the top of a page, and no pages made of floats only
+\setcounter{topnumber}{2}
+\setcounter{bottomnumber}{1}
+\setcounter{dbltopnumber}{2}
+\setcounter{totalnumber}{4}
+\renewcommand{\topfraction}{0.8}
+\renewcommand{\dbltopfraction}{0.8}
+\renewcommand{\bottomfraction}{0.5}
+\renewcommand{\textfraction}{0.15}
+\renewcommand{\floatpagefraction}{0.9}
+\renewcommand{\dblfloatpagefraction}{0.9}
+
+\begin{document}
+\raggedbottom
+
+\title{Polynomial regression on Runge's function:\\ least squares, Ridge and Lasso with resampling and gradient descent\\[2pt]
+\normalsize FYS-STK3155/4155, Project 1}
+
+\author{Pietro Monacelli}
+\author{Giorgio Spreafico}
+\author{Elia Valenti}
+\author{Georgios Kotrotsios}
+\affiliation{Department of Physics, University of Oslo, N-0316 Oslo, Norway}
+\date{October 5, 2026}
+
+\begin{abstract}
+Fitting a polynomial to noisy data raises the questions that every supervised method must answer:
+how complex the model should be, how its error is estimated, and how its parameters are computed.
+We fitted Runge's function, sampled at 100 points with noise of standard deviation 0.1, with
+polynomials up to degree 15 by ordinary least squares, Ridge and Lasso regression, and compared
+the closed-form solutions with our own codes for gradient descent, momentum, AdaGrad, RMSprop,
+Adam and stochastic gradient descent. Ten-fold cross-validation selected degree 11 for least
+squares, 12 for Ridge and 8 for the Lasso, with errors of 0.020, 0.019 and 0.022 that differ by
+about one standard error. The bootstrap attributes the failure of high-degree least squares to
+variance, which the penalties reduced by factors of 6 and 50 at degree 12. Plain gradient descent
+reached the closed-form solution only up to degree 6; a small Ridge penalty restored convergence
+at every degree. For this problem the penalties do not lower the best attainable error; they make
+the result insensitive to the degree and make iterative solvers usable.
+\end{abstract}
+
+\maketitle
+
+\section{Introduction}\label{sec:intro}
+
+A polynomial is the simplest flexible model that is still linear in its parameters. Its
+coefficients follow from one linear-algebra operation, and its flexibility is set by a single
+integer, the degree. This makes polynomial regression a good laboratory for questions that return
+in every supervised learning method. How complex should the model be? How do we estimate the error
+it will make on new data? And how do we compute its parameters when no closed-form solution
+exists?
+
+The function studied here, $f(x)=1/(1+25x^2)$ on $[-1,1]$, is the standard example of what goes
+wrong when the degree is too high. Runge showed that polynomial interpolation of this function at
+equidistant points oscillates more and more strongly near the ends of the interval as the degree
+grows~\cite{runge1901}. With noisy data the same flexibility has a second effect: a high-degree
+polynomial follows the noise of the particular sample it was fitted to. The general statement
+is the bias-variance tradeoff~\cite{hastie2009,hjorthjensen2026}: the expected error on new data
+is the sum of a squared bias, which decreases with the complexity of the model, a variance, which
+increases with it, and the variance of the noise, which no model can remove.
+
+We compare three linear models. Ordinary least squares (OLS) minimises the squared residuals and
+nothing else. Ridge regression~\cite{hoerl1970} adds a penalty on the squared size of the
+parameters, which shrinks them and stabilises the fit when the features are nearly collinear. The
+Lasso~\cite{tibshirani1996} penalises the absolute values instead, which can set parameters exactly
+to zero but leaves no closed-form solution. To choose the degree and the penalty we need an
+estimate of the error on unseen data from a single data set. We use two resampling methods: the
+bootstrap~\cite{efron1979}, which also separates bias from variance, and $K$-fold
+cross-validation~\cite{hastie2009,hjorthjensen2026}.
+
+The Lasso has to be solved iteratively, and so do the models of the later projects of this course.
+We therefore also replace the closed-form OLS and Ridge solutions by gradient descent and study
+how the learning rate and the conditioning of the problem control its convergence. We then add
+momentum~\cite{polyak1964}, the adaptive methods AdaGrad~\cite{duchi2011},
+RMSprop~\cite{tieleman2012} and Adam~\cite{kingma2015}, and stochastic gradient
+descent~\cite{robbins1951}. Gradients are computed analytically and checked against automatic
+differentiation~\cite{baydin2018} with JAX~\cite{jax2018}.
+
+Our own code covers the OLS and Ridge solvers based on the singular value decomposition, the
+scaling of the data, the bootstrap estimate of bias and variance, gradient descent with all the
+update rules above, the subgradient method for the Lasso and stochastic gradient descent. It was
+developed from the weekly notebooks of the course and the starter code of the project
+description~\cite{weekly2026,project1}, with the help of a large language model. The text of this
+report was drafted with the same tool. Both uses are declared in Appendix~\ref{app:llm}. Library routines are used for the train/test split, for $K$-fold
+cross-validation, and for the coordinate-descent Lasso that serves as reference solution and in the
+final model selection (Scikit-Learn~\cite{pedregosa2011}); for automatic differentiation (JAX); and
+for the singular value decomposition (NumPy~\cite{harris2020}). The figures were made with
+Matplotlib~\cite{hunter2007}.
+
+Section~\ref{sec:methods} presents the data, the models, the bias-variance decomposition with its
+derivation, the resampling methods and the optimisers. Section~\ref{sec:implementation} describes
+the implementation and the tests against library routines and closed-form solutions.
+Section~\ref{sec:results} presents and discusses the results in the order of the project
+description: OLS, Ridge, the bootstrap, cross-validation, gradient descent and its variants, the
+Lasso, stochastic gradient descent and the final model selection. Section~\ref{sec:conclusion}
+gives our conclusions, the limitations of the study and possible extensions. The notebook with all
+code and outputs is available at \repourl.
+
+\section{Methods}\label{sec:methods}
+
+\subsection{Data and model}\label{sec:data}
+
+We generate $n$ inputs $x_i$ uniformly on $[-1,1]$ and targets
+\begin{equation}
+  y_i=f(x_i)+\varepsilon_i,\qquad \varepsilon_i\sim\mathcal N(0,\sigma^2),
+  \label{eq:data}
+\end{equation}
+with $f$ Runge's function. The base case is $n=100$ and $\sigma=0.1$; we also vary $n$ between 40
+and 2000 and $\sigma$ between 0 and 0.3. The noise is $\sigma$ times a standard normal number from
+a NumPy generator with the fixed seed 2026. The same seed gives the same inputs and the same noise
+pattern for every $\sigma$, so comparisons between noise levels isolate the effect of its size.
+The data are split once at random into 80\% training and 20\% test data, inside the range of
+$2/3$ to $4/5$ recommended in the project description~\cite{project1}.
+
+The model is a polynomial of degree $d$,
+\begin{equation}
+  \tilde y(x)=\theta_0+\sum_{j=1}^{d}\theta_jx^j,
+  \label{eq:model}
+\end{equation}
+which is linear in the intercept $\theta_0$ and in the slope parameters
+$\bm\theta=(\theta_1,\dots,\theta_d)^T$. It has $p=d+1$ fitted parameters.
+
+\subsection{Scaling, centring and the intercept}\label{sec:scaling}
+
+The design matrix has the columns $x,x^2,\dots,x^d$ and no column of ones. Each column is
+standardised: we subtract its mean and divide by its standard deviation. The targets are centred by
+subtracting their mean $\bar y$. Means and standard deviations are computed from the training data
+only and are then applied unchanged to the test data. For centred columns the least-squares
+intercept is $\hat\theta_0=\bar y_{\rm train}$~\cite{hjorthjensen2026}, so the prediction is
+$\tilde{\bm y}=\bm X\bm\theta+\bar y_{\rm train}$. From here on $\bm X\in\mathbb R^{n\times d}$
+denotes the standardised training matrix and $\bm y$ the centred training targets.
+
+We scale for four reasons. (i) The intercept should not be penalised, because a penalty on
+$\theta_0$ would make the fit depend on the origin chosen for $y$. Centring removes the intercept
+from $\bm\theta$, so Ridge and Lasso penalise the slopes only. (ii) Ridge and Lasso are not
+invariant under a rescaling of the columns. Their penalties treat all $\theta_j$ alike, which is
+meaningful only if the columns have the same scale; without standardisation the result would
+depend on the units of $x$. (iii) The speed of gradient descent is set by the condition number of
+$\bm X^T\bm X$ (Sec.~\ref{sec:gd}), which depends on the relative scale of the columns. (iv) The
+statistics come from the training data because the test data must play the role of data not yet
+seen. For OLS these arguments are weaker. Its predictions do not change under a shift or rescaling
+of the columns as long as an intercept is fitted, so for OLS scaling is a numerical precaution;
+we check this in Sec.~\ref{sec:res_ols}. Standardisation changes the size of the columns, not their
+shape. It does not remove the near collinearity of the high powers of $x$, which is the main
+numerical difficulty of this project.
+
+\subsection{OLS and Ridge regression through the SVD}\label{sec:ridge}
+
+OLS minimises $\norm{\bm y-\bm X\bm\theta}_2^2$. Ridge regression minimises
+\begin{equation}
+  C_{\rm R}(\bm\theta)=\norm{\bm y-\bm X\bm\theta}_2^2+\lambda\norm{\bm\theta}_2^2,\qquad\lambda\ge0,
+  \label{eq:ridgecost}
+\end{equation}
+with the solution $\hat{\bm\theta}_{\rm R}=(\bm X^T\bm X+\lambda\bm I)^{-1}\bm X^T\bm y$; $\lambda=0$
+gives OLS. This is the convention without a factor $1/n$ in front of the squared error, which is
+also that of \texttt{Ridge(alpha=$\lambda$)} in Scikit-Learn.
+
+We do not form $\bm X^T\bm X$, which would square the condition number. Instead we use the thin
+singular value decomposition $\bm X=\bm U\bm\Sigma\bm V^T$ with singular values
+$\sigma_0\ge\sigma_1\ge\dots\ge\sigma_{d-1}$. As in the lecture notes, $\sigma_i$ with an index is a
+singular value, while $\sigma$ without an index is the noise level. Then
+\begin{equation}
+  \hat{\bm\theta}_{\rm R}=\sum_{i=0}^{d-1}\frac{\sigma_i}{\sigma_i^2+\lambda}\,(\bm u_i^T\bm y)\,\bm v_i,
+  \label{eq:ridgesvd}
+\end{equation}
+and the fitted values are
+\begin{equation}
+  \bm X\hat{\bm\theta}_{\rm R}=\sum_{i=0}^{d-1}\frac{\sigma_i^2}{\sigma_i^2+\lambda}\,\bm u_i\bm u_i^T\bm y.
+  \label{eq:shrink}
+\end{equation}
+OLS gives every direction $\bm v_i$ the coefficient $(\bm u_i^T\bm y)/\sigma_i$. Ridge multiplies it
+by the shrinkage factor $\sigma_i^2/(\sigma_i^2+\lambda)\le1$: directions with $\sigma_i^2\gg\lambda$
+are kept, directions with $\sigma_i^2\ll\lambda$ are removed. The noise contributes a variance
+$\sigma^2/\sigma_i^2$ to the OLS coefficient along $\bm v_i$~\cite{hjorthjensen2026}, so the
+directions that Ridge removes are the ones most sensitive to noise. The sum of the shrinkage
+factors,
+\begin{equation}
+  \df(\lambda)=\sum_{i=0}^{d-1}\frac{\sigma_i^2}{\sigma_i^2+\lambda},
+  \label{eq:df}
+\end{equation}
+is the effective number of parameters of the Ridge fit; it decreases from $d$ at $\lambda=0$ to
+zero for $\lambda\to\infty$. For OLS, singular values below
+$\epsilon_{\rm mach}\max(n,d)\,\sigma_0$ are treated as zero and their directions are dropped. This
+is the pseudoinverse solution, with the cutoff of the least-squares routine of NumPy.
+
+\subsection{The Lasso}\label{sec:lasso}
+
+The Lasso replaces the squared penalty by the sum of the absolute values. We use the normalised
+cost of the lecture notes,
+\begin{equation}
+  C_{\rm L}(\bm\theta)=\frac1n\norm{\bm y-\bm X\bm\theta}_2^2+\lb\norm{\bm\theta}_1.
+  \label{eq:lassocost}
+\end{equation}
+The bar marks a penalty that multiplies a cost normalised by $1/n$; its values cannot be compared
+with those of $\lambda$ in Eq.~\eqref{eq:ridgecost}. The \texttt{Lasso} of Scikit-Learn minimises
+$\frac{1}{2n}\norm{\bm y-\bm X\bm\theta}_2^2+\alpha\norm{\bm\theta}_1$, which is half of
+Eq.~\eqref{eq:lassocost} with $\alpha=\lb/2$.
+
+The function $|\theta|$ has no derivative at $\theta=0$, and Eq.~\eqref{eq:lassocost} has no
+closed-form minimiser. The subdifferential of $|\theta|$ at zero is the interval $[-1,1]$: every
+number in it is the slope of a line that touches $|\theta|$ at zero and stays below it. Any element
+of the subdifferential can serve as a subgradient, and we use
+\begin{equation}
+  \bm g_{\rm L}(\bm\theta)=\frac2n\bm X^T(\bm X\bm\theta-\bm y)+\lb\,\sign(\bm\theta)
+  \label{eq:lassograd}
+\end{equation}
+with $\sign(0)=0$, that is, the element 0 of the subdifferential at zero. At the minimum a coefficient is exactly zero when
+$\lvert\frac2n\bm x_j^T(\bm y-\bm X\bm\theta)\rvert\le\lb$~\cite{hjorthjensen2026}, where $\bm x_j$ is
+column $j$ of $\bm X$: the penalty then outweighs what the column could still explain. This is how
+the Lasso selects features. Coordinate descent with soft thresholding, the algorithm of
+Scikit-Learn, produces such exact zeros. A subgradient step of fixed length does not, as
+Sec.~\ref{sec:res_lasso} shows.
+
+\subsection{Error measures and the bias-variance decomposition}\label{sec:biasvar}
+
+We measure the quality of a fit by the mean squared error and the $R^2$ score,
+\begin{equation}
+  \mathrm{MSE}=\frac1n\sum_{i=0}^{n-1}(y_i-\tilde y_i)^2,\qquad
+  R^2=1-\frac{\sum_i(y_i-\tilde y_i)^2}{\sum_i(y_i-\bar y)^2},
+  \label{eq:mse}
+\end{equation}
+evaluated on the training data or on the test data.
+
+The expected test error can be decomposed as follows. Consider a test input $x_i$ with target
+$y_i=f_i+\varepsilon_i$, $f_i=f(x_i)$, and a model fitted to a training set $\mathcal L$ drawn at
+random. Its prediction $\tilde y_i=\tilde y(x_i;\mathcal L)$ is a random variable, because another
+training set would give another fit. The expectation $\E$ is taken over two sources of randomness:
+the training set $\mathcal L$, and the noise $\varepsilon_i$ of the test target, which is
+independent of $\mathcal L$. The test inputs are held fixed and $f_i$ is not random. We add and
+subtract the mean prediction $\E[\tilde y_i]$,
+\begin{equation}
+  y_i-\tilde y_i=\underbrace{f_i-\E[\tilde y_i]}_{a_i}
+  +\underbrace{\E[\tilde y_i]-\tilde y_i}_{b_i}+\varepsilon_i .
+\end{equation}
+The square is $a_i^2+b_i^2+\varepsilon_i^2$ plus three cross terms whose expectations vanish:
+$\E[a_ib_i]=a_i\E[b_i]=0$, because $a_i$ is fixed and $\E[b_i]=0$ by construction;
+$\E[a_i\varepsilon_i]=a_i\E[\varepsilon_i]=0$, because the noise has zero mean; and
+$\E[b_i\varepsilon_i]=\E[b_i]\,\E[\varepsilon_i]=0$, because the test noise is independent of the
+training set. With $\E[b_i^2]=\Var[\tilde y_i]$ and $\E[\varepsilon_i^2]=\sigma^2$, the average
+over the $n_{\rm test}$ test points is
+\begin{align}
+  \E\big[(\bm y-\tilde{\bm y})^2\big]
+  &=\frac{1}{n_{\rm test}}\sum_i\big(f_i-\E[\tilde y_i]\big)^2 \nonumber\\
+  &\quad+\frac{1}{n_{\rm test}}\sum_i\E\big[(\tilde y_i-\E[\tilde y_i])^2\big]+\sigma^2 \nonumber\\
+  &=\Bias^2[\tilde y]+\Var[\tilde y]+\sigma^2 .
+  \label{eq:biasvar}
+\end{align}
+
+The squared bias measures how far the average prediction, over all training sets, is from the true
+function. It comes from the limits of the model family (a polynomial of low degree cannot produce
+the narrow peak of $f$), and more data do not remove it. The variance measures how much the
+prediction changes when the training set is redrawn: a flexible model follows the noise of the
+sample it is given. The third term is the variance of the noise in the test target, which no model
+can predict; it is a lower bound for the expected test error. Raising the degree lowers the bias
+and raises the variance, so their sum has a minimum at an intermediate complexity.
+
+In practice $f$ is unknown, and the bias is computed with the test data $y_i$ in place of $f_i$.
+Since
+\begin{align}
+  \frac{1}{n_{\rm test}}\sum_i\big(y_i-\E[\tilde y_i]\big)^2
+  &=\Bias^2+\frac{1}{n_{\rm test}}\sum_i\varepsilon_i^2 \nonumber\\
+  &\quad+\frac{2}{n_{\rm test}}\sum_i\varepsilon_i\big(f_i-\E[\tilde y_i]\big),
+\end{align}
+where the last term has zero mean and the second has mean $\sigma^2$, the measured bias equals
+$\Bias^2+\sigma^2$ on average. It absorbs the noise variance: the decomposition then reads error
+$=$ measured bias$^2$ $+$ variance, without a separate noise term, and the measured bias cannot
+fall much below $\sigma^2$ even for a perfect model.
+
+\subsection{Resampling: bootstrap and cross-validation}\label{sec:resampling}
+
+\emph{Bootstrap.} Equation~\eqref{eq:biasvar} needs an ensemble of training sets, but we have only
+one. The bootstrap~\cite{efron1979} creates $B$ new training sets by drawing $n_{\rm train}$ points
+with replacement from the training set. Each resample contains on average only
+$1-(1-1/n_{\rm train})^{n_{\rm train}}\approx63\%$ of the distinct training
+points~\cite{hjorthjensen2026}. A polynomial is fitted to every resample, scaled with the statistics
+of that resample, and all $B$ models predict the same test points. With $\tilde y_{ib}$ the
+prediction of model $b$ at test point $i$ and $\bar y_i=\frac1B\sum_b\tilde y_{ib}$, the estimates
+are
+\begin{align}
+  \text{error}&=\frac{1}{n_{\rm test}}\sum_i\frac1B\sum_b(y_i-\tilde y_{ib})^2,\nonumber\\
+  \text{bias}^2&=\frac{1}{n_{\rm test}}\sum_i(y_i-\bar y_i)^2,\label{eq:bootest}\\
+  \text{variance}&=\frac{1}{n_{\rm test}}\sum_i\frac1B\sum_b(\tilde y_{ib}-\bar y_i)^2.\nonumber
+\end{align}
+The bias is the measured one, which contains $\sigma^2$, and the three estimates satisfy error $=$
+bias$^2$ $+$ variance exactly. We use $B=100$ and the split of Sec.~\ref{sec:data}.
+
+\emph{Cross-validation.} In $K$-fold cross-validation~\cite{hastie2009} the data are shuffled and
+divided into $K$ folds. Each fold is held out once while the model is fitted to the other $K-1$
+folds, and the cross-validated (CV) MSE is the mean of the $K$ held-out errors. Every point is used
+once for testing and $K-1$ times for training. We apply it to all 100 points of the base case with
+$K=5$ and $K=10$, using \texttt{KFold} with shuffling and \texttt{cross\_val\_score} of
+Scikit-Learn, with the same folds for every degree and every penalty. As a measure of the
+uncertainty of a CV estimate we use its standard error, the standard deviation of the $K$ fold
+errors divided by $\sqrt K$.
+
+The model handed to the cross-validation is a pipeline: polynomial features, standardisation, and
+regression with an unpenalised intercept. The whole pipeline is refitted on the training folds of
+every split, so the scaler learns its means and standard deviations from the training folds only,
+and the held-out fold is transformed with these numbers. This matters because the held-out fold
+must be treated exactly like future data. If the scaler were fitted once on all data, every
+training fold would contain information about its own held-out fold, and the CV error would be
+biased towards optimistic values. For scaling alone the effect is small, and for OLS it vanishes.
+It becomes important for the penalised methods, which are not scale invariant, and for any
+preprocessing that uses the targets~\cite{hjorthjensen2026}.
+
+\subsection{Gradient descent and the learning rate}\label{sec:gd}
+
+For gradient descent we use the cost normalised by the number of data points,
+\begin{equation}
+  C(\bm\theta)=\frac1n\norm{\bm y-\bm X\bm\theta}_2^2+\lb\norm{\bm\theta}_2^2,
+  \label{eq:gdcost}
+\end{equation}
+with gradient and Hessian
+\begin{equation}
+  \nabla C=\frac2n\bm X^T(\bm X\bm\theta-\bm y)+2\lb\bm\theta,\qquad
+  \bm H=\frac2n\bm X^T\bm X+2\lb\bm I,
+  \label{eq:grad}
+\end{equation}
+where $\lb=0$ is OLS. The minimiser of Eq.~\eqref{eq:gdcost} is
+$(\bm X^T\bm X+n\lb\bm I)^{-1}\bm X^T\bm y$, the Ridge solution of Eq.~\eqref{eq:ridgesvd} with
+$\lambda=n\lb$. The factor $n$ must be included when gradient descent is compared with the closed
+form; otherwise the two minimise different costs. With our $n=80$ training points, $\lb=10^{-2}$
+corresponds to $\lambda=0.8$.
+
+Gradient descent iterates
+\begin{equation}
+  \bm\theta_{k+1}=\bm\theta_k-\eta\,\nabla C(\bm\theta_k)
+  \label{eq:gd}
+\end{equation}
+with a fixed learning rate $\eta$. For a quadratic cost the error $\bm\theta_k-\hat{\bm\theta}$
+along the eigenvector of $\bm H$ with eigenvalue $\lambda_i$ is multiplied by $1-\eta\lambda_i$ in
+every step~\cite{hjorthjensen2026}. (Eigenvalues of the Hessian always carry an index, as in
+$\lambda_i$, $\lambda_{\max}$ and $\lambda_{\min}$; the penalty never does.) The iteration therefore
+converges if and only if
+\begin{equation}
+  \eta<\frac{2}{\lambda_{\max}} .
+  \label{eq:etamax}
+\end{equation}
+The fastest fixed rate is $\eta^*=2/(\lambda_{\max}+\lambda_{\min})$, and at $\eta^*$ the error
+shrinks by the factor $(\kappa-1)/(\kappa+1)$ per step, where
+$\kappa=\lambda_{\max}/\lambda_{\min}$ is the condition number of the Hessian. For large $\kappa$
+the number of iterations needed for a given accuracy is proportional to $\kappa$. In terms of the
+singular values of $\bm X$ the eigenvalues are $\lambda_i=2\sigma_i^2/n+2\lb$. For OLS this gives
+$\kappa(\bm H)=\kappa(\bm X)^2$, and a positive $\lb$ lifts the smallest eigenvalue and lowers
+$\kappa$.
+
+All runs start from $\bm\theta_0=\bm0$. They stop when
+$\norm{\bm\theta_k-\hat{\bm\theta}}_2<10^{-6}$, where $\hat{\bm\theta}$ is the closed-form solution,
+when the distance exceeds $10^6$ (divergence), or after a maximum number of iterations ($10^5$ for
+plain gradient descent, $2\times10^4$ in the comparison of the optimisers).
+
+\emph{Automatic differentiation.} The gradient in Eq.~\eqref{eq:grad} is also computed by automatic
+differentiation (AD) with \texttt{jax.grad}, applied to the cost written as an ordinary Python
+function. AD is neither symbolic nor numerical differentiation~\cite{baydin2018,hjorthjensen2026}.
+Symbolic differentiation manipulates formulas and returns a formula, which can grow much faster
+than the original expression. Numerical differentiation replaces the derivative by a difference
+quotient with a step $h$. It has a truncation error that decreases with $h$ and a rounding error
+that increases as $h$ decreases, so a central difference reaches a relative accuracy of order
+$10^{-11}$ at best in double precision, and a gradient with respect to $p$ parameters costs $2p$
+evaluations of the cost. AD applies the exact derivative rule of each elementary operation along
+the sequence of operations that the program executes, and combines them with the chain rule. It
+returns the numerical value of the derivative at a point, with no step $h$ and no truncation
+error, so it is accurate to rounding. In reverse mode, which \texttt{jax.grad} uses, the value and
+the complete gradient of a scalar cost require at most a small constant multiple (at most about
+four) of the operations of one evaluation of the cost, whatever the number of parameters.
+
+\subsection{Momentum and adaptive learning rates}\label{sec:optimisers}
+
+The other update rules differ in how the step is built from the gradient
+$\bm g_t=\nabla C(\bm\theta_{t-1})$ at step $t=1,2,\dots$ All operations on vectors are elementwise
+and all auxiliary vectors start at zero.
+{\allowdisplaybreaks
+\begin{align}
+  &\text{Momentum:}&&\bm v_t=\beta\bm v_{t-1}+\eta\bm g_t,\nonumber\\*
+  &&&\bm\theta_t=\bm\theta_{t-1}-\bm v_t. \label{eq:momentum}\\
+  &\text{AdaGrad:}&&\bm r_t=\bm r_{t-1}+\bm g_t^2,\nonumber\\*
+  &&&\bm\theta_t=\bm\theta_{t-1}-\frac{\eta\,\bm g_t}{\sqrt{\bm r_t}+\epsilon}. \label{eq:adagrad}\\
+  &\text{RMSprop:}&&\bm r_t=\rho\bm r_{t-1}+(1-\rho)\bm g_t^2,\nonumber\\*
+  &&&\bm\theta_t\ \text{as in Eq.~\eqref{eq:adagrad}}. \label{eq:rmsprop}\\
+  &\text{Adam:}&&\bm m_t=\beta_1\bm m_{t-1}+(1-\beta_1)\bm g_t,\nonumber\\*
+  &&&\bm r_t=\beta_2\bm r_{t-1}+(1-\beta_2)\bm g_t^2,\nonumber\\*
+  &&&\bm\theta_t=\bm\theta_{t-1}-\frac{\eta\,\hat{\bm m}_t}{\sqrt{\hat{\bm r}_t}+\epsilon}, \label{eq:adam}
+\end{align}}
+with the bias-corrected averages $\hat{\bm m}_t=\bm m_t/(1-\beta_1^t)$ and
+$\hat{\bm r}_t=\bm r_t/(1-\beta_2^t)$. We use the values of the course notebooks: $\beta=0.9$,
+$\rho=0.99$, $\beta_1=0.9$, $\beta_2=0.999$ and $\epsilon=10^{-8}$. For plain gradient descent and
+momentum, $\eta$ multiplies the gradient, so the stable range of $\eta$ is set by the curvature of
+the cost. For the adaptive methods the gradient is divided by a measure of its own typical size,
+so $\eta$ acts as a step length in parameter space~\cite{hjorthjensen2026}.
+
+\subsection{Stochastic gradient descent}\label{sec:sgd}
+
+Stochastic gradient descent (SGD) replaces the full gradient by the gradient over a random
+minibatch of $M$ of the $n$ training points, which is an unbiased but noisy estimate of the full
+gradient. One epoch is a pass through all points in $n/M$ minibatches, taken from a new random
+permutation in every epoch. An epoch costs the same arithmetic as one step with the full gradient,
+whatever the value of $M$~\cite{hjorthjensen2026}, so we compare results per epoch. The update
+rules are those of Sec.~\ref{sec:optimisers}, applied to the minibatch gradient. Besides constant
+learning rates we use the schedule
+\begin{equation}
+  \eta_t=\frac{t_0}{t+t_1},
+  \label{eq:schedule}
+\end{equation}
+where $t$ counts updates: the learning rate starts at $t_0/t_1$ and decays as $1/t$ after about
+$t_1$ updates. Because the SGD iterate fluctuates around the minimum, we measure its accuracy by
+the excess cost $C(\bm\theta)-C(\hat{\bm\theta})$ over the closed-form minimum, and we summarise the
+final state by the median over the last 100 epochs.
+
+\section{Implementation and tests}\label{sec:implementation}
+
+\begin{figure}[t]
+\includegraphics[width=\linewidth]{Figures/fig_ols_fits.pdf}
+\caption{OLS fits of degree 4, 8 and 15 to the base data set ($n=100$, $\sigma=0.1$; the 80
+training points are shown) and Runge's function $f(x)$. Degree 4 cannot follow the peak; degree
+15 oscillates between the data points and near the ends of the interval.}
+\label{fig:fits}
+\end{figure}
+
+All computations are contained in one Jupyter notebook, organised in the parts a) to i) of the
+project description. Each part defines a few short functions that later parts reuse:
+\texttt{make\_data}, \texttt{polynomial\_features} and \texttt{scale\_train\_test} for the data and
+its scaling; \texttt{ols\_svd} and \texttt{ridge\_svd} for the closed forms
+(Listing~\ref{lst:svd}); \texttt{bootstrap\_bias\_variance} for Eq.~\eqref{eq:bootest};
+\texttt{gradient\_descent}, \texttt{optimiser\_step}, \texttt{optimise\_to\_accuracy} and
+\texttt{sgd} for the iterative methods. The Scikit-Learn pipelines of Sec.~\ref{sec:resampling}
+are built by three small functions, one for each model. Every cell states which course notebook it
+was adapted from and what was changed, and the code is commented line by line.
+
+\begin{lstlisting}[caption={The two closed-form solvers (comments and docstrings removed).},label={lst:svd}]
+def ols_svd(X, y):
+    U, s, Vt = np.linalg.svd(X, full_matrices=False)
+    cutoff = np.finfo(float).eps * max(X.shape) * s[0]
+    keep = s > cutoff
+    coeffs = (U[:, keep].T @ y) / s[keep]
+    return Vt[keep].T @ coeffs
+
+def ridge_svd(X, y, lam):
+    U, s, Vt = np.linalg.svd(X, full_matrices=False)
+    factor = s / (s**2 + lam)
+    return Vt.T @ (factor * (U.T @ y))
+\end{lstlisting}
+
+Since the closed-form solutions serve as the reference for all iterative methods, we first tested
+them against independent library routines, and then tested every further step against a known
+result. Table~\ref{tab:tests} collects these checks. The solvers agree with NumPy and Scikit-Learn
+to rounding accuracy. The agreement of the Ridge solver with the normal equations degrades from
+$10^{-15}$ at $\lambda=100$ to $10^{-10}$ at $\lambda=10^{-4}$. This is expected, since the
+condition number of $\bm X^T\bm X+\lambda\bm I$ grows as $\lambda$ decreases, and it illustrates
+why we solve through the SVD of $\bm X$ instead.
+
+All random choices (data, split, bootstrap indices, folds, minibatch order) use the seed 2026. A
+run of the notebook from top to bottom reproduces every number quoted in this report; only the
+quantities at rounding level in Table~\ref{tab:tests} and the computing times of
+Sec.~\ref{sec:res_sgd} change from run to run.
+
+\begin{table*}[t]
+\caption{Tests of the implementation. Unless stated otherwise the data are those of the base case
+($n=100$, $\sigma=0.1$) with the 80 standardised training points; ``difference'' is the largest
+absolute difference between the two results.}
+\label{tab:tests}
+\begin{ruledtabular}
+\begin{tabular}{p{0.33\textwidth}p{0.33\textwidth}p{0.27\textwidth}}
+\rr Quantity tested & \rr Compared with & \rr Result \\
+\hline
+\rr OLS parameters from \texttt{ols\_svd}, $d=15$, all 100 points &
+  \rr \texttt{numpy.linalg.pinv} and \texttt{lstsq} &
+  \rr difference $5\times10^{-13}$ for parameters up to 596 \\
+\rr Test predictions of the scaled OLS fit, $d=15$ &
+  \rr unscaled fit with a column of ones; \texttt{LinearRegression} of Scikit-Learn &
+  \rr difference below $10^{-11}$ \\
+\rr \texttt{ridge\_svd} at $\lambda=0$, $d=15$ & \rr \texttt{ols\_svd} & \rr difference below $10^{-12}$ \\
+\rr \texttt{ridge\_svd} at $\lambda=10^{-4},10^{-2},1,100$ &
+  \rr normal equations; \texttt{Ridge(alpha=$\lambda$)} of Scikit-Learn &
+  \rr relative difference $10^{-10}$ to $10^{-15}$ \\
+\rr Fitted values from the shrinkage factors, Eq.~\eqref{eq:shrink} & \rr $\bm X\hat{\bm\theta}_{\rm R}$ &
+  \rr difference below $10^{-14}$ \\
+\rr Training MSE and $\norm{\hat{\bm\theta}_{\rm R}}_2$ on 131 values of $\lambda$ &
+  \rr theory: non-decreasing and strictly decreasing in $\lambda$ & \rr both hold \\
+\rr Bootstrap estimates, Eq.~\eqref{eq:bootest} & \rr identity error $=$ bias$^2$ $+$ variance &
+  \rr holds for every degree \\
+\rr Analytical gradients of Eq.~\eqref{eq:grad}, OLS and Ridge (unscaled design matrix of the starter code) & \rr \texttt{jax.grad} (64-bit) &
+  \rr difference at most $2\times10^{-16}$ \\
+\rr Gradient descent with the analytical gradient, $d=5$ & \rr the same with the JAX gradient &
+  \rr same iteration counts; parameters differ by less than $10^{-15}$ \\
+\rr Largest learning rate that converges, grid of 60 values, $d=5$ &
+  \rr bound $2/\lambda_{\max}$, Eq.~\eqref{eq:etamax} & \rr 0.3594 against 0.3596 (OLS), 0.3581 against 0.3583 (Ridge) \\
+\rr Lasso by subgradient descent, $d=5$, $\lb=10^{-2}$ &
+  \rr \texttt{Lasso(alpha=$\lb/2$)} of Scikit-Learn & \rr parameters agree to four decimals \\
+\end{tabular}
+\end{ruledtabular}
+\end{table*}
+
+\section{Results and discussion}\label{sec:results}
+
+\subsection{OLS: degree, sample size and noise}\label{sec:res_ols}
+
+\begin{figure*}[t]
+\includegraphics[width=\textwidth]{Figures/fig_ols_mse_r2.pdf}
+\caption{Left: training and test MSE of OLS against the polynomial degree for the base data set
+($n=100$, $\sigma=0.1$, 80 training and 20 test points). Dotted: expected training MSE
+$\sigma^2(n_{\rm train}-p)/n_{\rm train}$ of a model without bias, with $p=d+1$; dash-dotted: the
+same with the noise variance realised in the training points (0.0150); dashed: $\sigma^2$. Right:
+the corresponding $R^2$ scores.}
+\label{fig:ols_mse}
+\end{figure*}
+
+Figure~\ref{fig:fits} shows the base data set and three OLS fits. The polynomial of degree 4 is
+too stiff to follow the peak of $f$, the fit of degree 8 is closest to $f$, and the fit of degree
+15 follows the peak best but oscillates between the data points and near the ends of the interval.
+Against the noise-free function on a fine grid, the mean squared distance is 0.0180, 0.0057 and
+0.0094 for degrees 4, 8 and 15, and the largest deviation of the degree-15 fit is 0.38 for
+$|x|>0.85$ against 0.23 in the interior.
+
+\begin{figure*}[t]
+\includegraphics[width=\textwidth]{Figures/fig_ols_parameters.pdf}
+\caption{OLS parameters for the base data set. Left: the coefficients $\theta_j$ of the
+standardised columns for selected degrees (the vertical axis is linear between $-1$ and $1$ and
+logarithmic outside). Right: the norm $\norm{\bm\theta}_2$ against the degree, for all
+coefficients and separately for the coefficients of the even and of the odd powers of $x$.}
+\label{fig:ols_theta}
+\end{figure*}
+
+\begin{figure*}[t]
+\includegraphics[width=\textwidth]{Figures/fig_ols_n_sigma.pdf}
+\caption{Test MSE of OLS against the degree. Left: for different numbers of data points $n$ at
+$\sigma=0.1$. Right: for different noise levels $\sigma$ at $n=100$ (same inputs and noise
+pattern; only the size of the noise changes). Every curve rests on one data set and one 80/20
+split.}
+\label{fig:ols_n_sigma}
+\end{figure*}
+
+Figure~\ref{fig:ols_mse} quantifies this. The training MSE decreases with every added power, from
+0.094 at $d=1$ to 0.0124 at $d=15$, as it must for nested models. The test MSE is lowest at $d=8$
+(0.0187, $R^2=0.849$) and then rises irregularly, to 0.044 at $d=13$. At $d=1$ the test $R^2$ is
+negative ($-0.14$): a straight line predicts the test points worse than their own mean does, which
+is possible for data not used in the fit. Both curves fall in steps, because $f$ is even and an
+odd power adds almost nothing.
+
+For a model without bias the expected training MSE is
+$\sigma^2(n_{\rm train}-p)/n_{\rm train}$~\cite{hjorthjensen2026}: the fit absorbs $p$ degrees of
+freedom of the noise, so the training error lies below $\sigma^2$. The noise realised in our 80
+training points has variance 0.0150 rather than 0.0100, so Fig.~\ref{fig:ols_mse} also shows this
+curve for the realised value. The training MSE reaches it at $d=14$ and 15 (0.0124 against 0.0122
+and 0.0120). From there on further parameters can only fit noise.
+
+\begin{figure*}[t]
+\includegraphics[width=\textwidth]{Figures/fig_ridge_degree.pdf}
+\caption{Ridge regression against the degree for five penalties $\lambda$
+[Eq.~\eqref{eq:ridgecost}], with the data and the split of Fig.~\ref{fig:ols_mse}. Left: training
+MSE; middle: test MSE; right: test $R^2$. The dashed black line is OLS ($\lambda=0$), the dotted
+line is $\sigma^2$.}
+\label{fig:ridge_degree}
+\end{figure*}
+
+\begin{figure*}[t]
+\includegraphics[width=\textwidth]{Figures/fig_ridge_lambda_df.pdf}
+\caption{Ridge regression at degree 15 as a function of the penalty. Left: training and test MSE;
+the dotted line is the test MSE of OLS at degree 15 and the vertical line marks the lowest test MSE
+($\lambda=5\times10^{-2}$). Right: effective number of parameters, Eq.~\eqref{eq:df}.}
+\label{fig:ridge_lambda}
+\end{figure*}
+
+The parameters (Fig.~\ref{fig:ols_theta}) explain why the high degrees fail. The norm
+$\norm{\bm\theta}_2$ grows from 0.86 at $d=4$ to 11.8 at $d=8$ and 669 at $d=15$, while the test
+error gets worse beyond $d=8$. The high powers of $x$ are nearly collinear on $[-1,1]$, so the
+data hardly determine their individual coefficients, and large coefficients of alternating sign
+compensate each other. Since $f$ is even, a good fit needs even powers only. Up to $d=8$ the odd
+coefficients are indeed negligible (norm 0.48 against 11.7 for the even ones). At $d=12$ and 15
+they reach 59 and 49, a sign that they are no longer determined by the data.
+
+Figure~\ref{fig:ols_n_sigma} shows the dependence on the number of data points and on the noise.
+With more data the best degree moves up, from 8 at $n=100$ to 14 at $n=500$ and 2000, and the
+training MSE at $d=15$ approaches $\sigma^2$ (0.0052, 0.0124, 0.0091 and 0.0101 for $n=50$, 100,
+500 and 2000): with more points a flexible model spends its parameters on the function instead of
+the noise. The curve for $n=50$ has its minimum at $d=11$ but rests on only 10 test points. More
+noise moves the best degree down, 12, 10, 8 and 8 for $\sigma=0$, 0.05, 0.1 and 0.3, with a best
+test $R^2$ of 0.981, 0.945, 0.849 and 0.505. At $\sigma=0$ the remaining test MSE (0.0015) is
+approximation error, and it keeps falling up to $d=12$. At $n=100$ the degradation at high degree
+is therefore not Runge's phenomenon alone. It comes mainly from the variance that the noise
+induces, which is largest near the ends of the interval (Fig.~\ref{fig:fits}).
+
+\begin{figure*}[t]
+\includegraphics[width=\textwidth]{Figures/fig_ridge_svd.pdf}
+\caption{Shrinkage of the singular-value modes of the standardised training matrix at degree 15.
+Left: squared singular values $\sigma_i^2$, with horizontal lines where $\sigma_i^2=\lambda$ for
+four penalties. Middle: shrinkage factor $\sigma_i^2/(\sigma_i^2+\lambda)$ of
+Eq.~\eqref{eq:shrink}. Right: magnitude of the coefficient along each direction $\bm v_i$ for OLS
+and for Ridge at $\lambda=5\times10^{-2}$.}
+\label{fig:ridge_svd}
+\end{figure*}
+
+\begin{figure*}[t]
+\includegraphics[width=\textwidth]{Figures/fig_train_test_complexity.pdf}
+\caption{Training and test MSE of OLS against the degree, up to degree 25, for four sample sizes
+($\sigma=0.1$; one data set and one 80/20 split per panel). This is our analogue of Fig.~2.11 of
+Ref.~\cite{hastie2009}. The dashed vertical line marks the lowest test MSE and the dotted line
+$\sigma^2$. Left of the minimum the model has high bias and low variance, right of it low bias
+and high variance. Test errors above 1 are outside the plotted range.}
+\label{fig:complexity}
+\end{figure*}
+
+\emph{Effect of the scaling.} We checked the arguments of Sec.~\ref{sec:scaling} at $d=15$. The
+scaled fit, an unscaled fit with a column of ones and the \texttt{LinearRegression} of
+Scikit-Learn give the same test predictions to rounding (Table~\ref{tab:tests}), and scaling
+statistics from all 100 points instead of the training points change nothing for OLS. On
+$[-1,1]$ standardisation barely improves the condition number of the design matrix
+($3.5\times10^5$ against $2.0\times10^5$), since all powers are of similar size. Its value shows
+when the units change. If $x$ is multiplied by 10, the condition number of the unscaled matrix
+becomes $6\times10^{14}$, the solver drops 4 of its 16 directions and the test MSE rises from
+0.034 to 0.216, whereas the standardised matrix and its fit do not change. Omitting both the
+column of ones and the centring forces the fit through $\tilde y(0)=0$, where $f(0)=1$, and gives
+a test MSE of 0.269. Standardisation thus protects against the choice of units and prepares the
+penalised methods and gradient descent, but it does not cure the collinearity.
+
+All numbers in this and the next subsection rest on one data set and one split with 20 test
+points, so single features of the test curves, such as the peak at $d=13$, should not be
+over-interpreted.
+
+\subsection{Ridge regression}\label{sec:res_ridge}
+
+\begin{figure*}[t]
+\begin{minipage}[t]{0.328\textwidth}\centering
+\includegraphics[width=\linewidth]{Figures/fig_bias_variance.pdf}\\[-2pt]
+(a)
+\end{minipage}\hfill
+\begin{minipage}[t]{0.328\textwidth}\centering
+\includegraphics[width=\linewidth]{Figures/fig_cv_ols.pdf}\\[-2pt]
+(b)
+\end{minipage}\hfill
+\begin{minipage}[t]{0.328\textwidth}\centering
+\includegraphics[width=\linewidth]{Figures/fig_cv_bootstrap.pdf}\\[-2pt]
+(c)
+\end{minipage}
+\caption{Resampling estimates of the test error of OLS against the degree for the base data set
+($n=100$, $\sigma=0.1$). (a) Bootstrap estimate of the error and its decomposition,
+Eq.~\eqref{eq:bootest}, with $B=100$; the bias is measured with the test data and contains
+$\sigma^2$, and the vertical line marks the lowest error, at degree 6. (b) Cross-validated MSE for
+$K=5$ and $K=10$ folds. (c) The two curves of (b) together with the bootstrap error of (a). The
+dotted horizontal lines are $\sigma^2$.}
+\label{fig:bv}
+\end{figure*}
+
+\begin{figure*}[t]
+\includegraphics[width=\textwidth]{Figures/fig_bias_variance_n.pdf}
+\caption{Bootstrap decomposition as in Fig.~\ref{fig:bv}(a) for four sample sizes ($\sigma=0.1$,
+$B=100$). The vertical range is the same in all panels; for $n=40$ and $n=100$ the error and the
+variance leave it at high degree.}
+\label{fig:bv_n}
+\end{figure*}
+
+Figure~\ref{fig:ridge_degree} repeats the analysis for five penalties. Ridge always raises the
+training error, because OLS is by definition the fit with the smallest training error: at $d=15$
+it rises from 0.0124 to 0.0149, 0.0181, 0.0307 and 0.0614 for $\lambda=10^{-4}$, $10^{-2}$, 1 and
+100. Where OLS overfits, a moderate penalty lowers the test error: at $d=15$ it falls from 0.034
+to 0.026 for $\lambda=10^{-4}$. At low degree there is little variance to remove, and a small
+penalty changes nothing (0.0185 at $\lambda=10^{-4}$ and $d=8$ against 0.0187 for OLS). A large
+penalty underfits at every degree (test MSE near 0.09 for $\lambda=100$), and a small one does
+not always help on a given split ($\lambda=10^{-6}$ gives 0.044 at $d=15$, more than OLS). The
+degree and $\lambda$ thus act as two controls of the same model complexity. On a grid of 23
+penalties between $10^{-8}$ and $10^{3}$ and the 15 degrees, the lowest test MSE is 0.0178, at
+$\lambda=10^{-3}$ and $d=8$. This is 5\% below the best OLS value, but the point was selected on
+the test set itself, so the estimate is optimistic and the gain is within the variation between
+splits.
+
+With the degree fixed at 15, $\lambda$ is the only control (Fig.~\ref{fig:ridge_lambda}). For
+$\lambda<10^{-8}$ the test MSE equals the OLS value 0.034. It reaches its minimum of 0.0256, 25\%
+lower, at $\lambda=5\times10^{-2}$, and rises steeply for $\lambda\gtrsim1$, to 0.12 at
+$\lambda=10^{3}$, where the penalty adds more bias than the variance it removes. In between the
+curve is not monotonic (0.045 near $\lambda=5\times10^{-7}$), which again reflects the single
+split. The effective number of parameters falls smoothly from 15 to 0.8. At the best $\lambda$ it
+is 7.6, close to the 8 slope parameters of the best OLS degree: the two controls settle on models
+of about the same effective size.
+
+Figure~\ref{fig:ridge_svd} shows how this works in the singular basis. The squared singular values
+of the degree-15 matrix span more than ten orders of magnitude, from 750 to $1.8\times10^{-8}$,
+which is a direct measure of the collinearity of the monomials. OLS divides by $\sigma_i$, so the
+weak directions receive large coefficients: about 97, 99 and 654 for the modes 11, 12 and 13. At
+$\lambda=5\times10^{-2}$ the shrinkage factor is at least 0.87 for the modes 0 to 6, 0.55 for mode
+7, 0.22 for mode 8, 0.04 for mode 9 and below 0.01 for the modes 10 to 14, and the three large
+coefficients become 0.04, 0.005 and 0.001. The transition lies where $\sigma_i^2\approx\lambda$,
+and the factors add up to $\df=7.6$. Because the singular values are spread so widely, a growing
+$\lambda$ passes them one after another, which explains the smooth decrease of $\df$ in
+Fig.~\ref{fig:ridge_lambda}. The norm of the Ridge solution decreases strictly with $\lambda$,
+from 611 at $\lambda=10^{-8}$ to 19.5, 4.0, 0.63 and 0.08 at $\lambda=10^{-4}$, $10^{-2}$, 1 and
+100.
+
+The best penalty depends on the noise and on the amount of data (selected on the test set at
+$d=15$, on a grid of five penalties per decade). It grows with the noise, $6\times10^{-8}$,
+$4\times10^{-5}$, $4\times10^{-2}$ and $2\times10^{-1}$ for $\sigma=0$, 0.05, 0.1 and 0.3, since
+more noise makes more directions not worth keeping. For $n=500$ and 2000 it is below $10^{-5}$
+and Ridge equals OLS: with enough data the weak directions are well determined. With noise, Ridge
+at degree 15 remains worse than OLS at its best degree (0.0256 against 0.0187 at $\sigma=0.1$). On
+this problem, choosing the degree is at least as effective as penalising. The benefit of Ridge is
+that it makes the result insensitive to a degree that is too high.
+
+\subsection{Bias-variance tradeoff with the bootstrap}\label{sec:res_bv}
+
+\begin{figure*}[t]
+\includegraphics[width=\textwidth]{Figures/fig_gd_learning_rate.pdf}
+\caption{Plain gradient descent at degree 5 (80 standardised training points). Left: distance to
+the closed-form OLS solution against the iteration, for five learning rates given as fractions of
+$\eta_{\max}=2/\lambda_{\max}$. Right: iterations needed to reach
+$\norm{\bm\theta_k-\hat{\bm\theta}}_2<10^{-6}$ against the learning rate, for OLS and for Ridge
+with $\lb=10^{-2}$; the dotted vertical lines mark $\eta^*$ and the dashed lines
+$2/\lambda_{\max}$.}
+\label{fig:gd}
+\end{figure*}
+
+Figure~\ref{fig:complexity} is our version of Fig.~2.11 of Ref.~\cite{hastie2009}, for degrees up
+to 25 and four sample sizes. In every panel the training MSE decreases monotonically. For $n=40$
+the test MSE is lowest at $d=6$ (0.0215); beyond that the training MSE falls far below $\sigma^2$
+(0.0025 at $d=25$) while the test MSE rises: the model fits the noise. For $n=100$ the minimum is
+at $d=8$ (0.0187), and the test error rises steeply beyond $d=16$. For $n=400$ and 1000 the
+training and the test error stay together near $\sigma^2$ up to $d=25$ (minima at $d=15$ and 17,
+both 0.010). With more data, overfitting starts at a higher degree and is weaker. Our curves are
+less smooth than the schematic figure of Ref.~\cite{hastie2009}, because each rests on a single
+data set.
+
+The bootstrap separates the two contributions [Fig.~\ref{fig:bv}(a)]. At low degree the variance is
+small (0.002 to 0.004 for $d\le5$): a stiff polynomial hardly changes from one resample to the
+next, and the error is almost entirely bias, which falls from 0.140 at $d=1$ to 0.036 at $d=4$.
+Around $d=6$ the variance (0.013) becomes comparable to the measured bias (0.024) and the error
+has its minimum, 0.0366. The minimum is shallow: the error lies between 0.037 and 0.041 for
+$d=4$, 5, 6 and 8. Beyond $d=9$ the variance grows rapidly, to 0.15 at $d=10$, 0.73 at $d=12$ and
+104 at $d=15$, and the error follows it. This is the variance side of the tradeoff: each
+high-degree model follows the noise of its own resample, and the weak singular directions of
+Fig.~\ref{fig:ridge_svd} amplify that noise by $\sigma^2/\sigma_i^2$.
+
+The measured bias never falls below 0.023, about twice $\sigma^2$, in line with
+Sec.~\ref{sec:biasvar}: it contains the noise variance. It also rises at high degree, to 0.91 at
+$d=14$ and 1.96 at $d=15$, although a richer polynomial family should not have a larger bias. We
+attribute much of this rise to the estimator. The mean prediction $\bar y_i$ in
+Eq.~\eqref{eq:bootest} is an average over only $B=100$ resamples, so it fluctuates with a variance
+of the order of the bootstrap variance divided by $B$, and this adds to the measured bias. At
+$d=15$ the contribution is $104/100\approx1.0$, about half of the measured value. The remainder
+reflects that a few resamples leave gaps in the data in which a high-degree fit takes extreme
+values, which also shifts the mean prediction. The bias curve is therefore reliable only where the
+variance is small, here up to about $d=9$.
+
+Figure~\ref{fig:bv_n} repeats the analysis for other sample sizes. The degree with the lowest
+error moves up with $n$: 6, 6, 14 and 14 for $n=40$, 100, 400 and 1000, with errors of 0.027,
+0.037, 0.011 and 0.011. (The errors are not monotonic in $n$ because each rests on its own small
+test set, 8 points for $n=40$.) The variance decreases with $n$ at every degree; at $d=15$ it is
+$1.4\times10^{8}$, 104, $7.0\times10^{-4}$ and $2.8\times10^{-4}$. More data postpone the growth
+of the variance and make a richer model affordable, while the bias at low degree is the same for
+all $n$, since it is a property of the model family. For $n\ge400$ the measured bias levels off at
+$\sigma^2$: once the true bias is small, what remains is the noise that it contains.
+
+\subsection{Cross-validation}\label{sec:res_cv}
+
+\begin{table}[t]
+\caption{Degree of the OLS polynomial selected by each estimate of the test error for the base
+data set ($n=100$, $\sigma=0.1$), and the estimated error at that degree.}
+\label{tab:selection}
+\begin{ruledtabular}
+\begin{tabular}{lcc}
+Estimate & Degree & Error \\
+\hline
+Single 80/20 split (test MSE) & 8 & 0.0187 \\
+Bootstrap, $B=100$ & 6 & 0.0366 \\
+5-fold cross-validation & 11 & 0.0211 \\
+10-fold cross-validation & 11 & 0.0202 \\
+\end{tabular}
+\end{ruledtabular}
+\end{table}
+
+\begin{table*}[t]
+\begin{minipage}[t]{0.485\textwidth}
+\caption{Plain gradient descent at $\eta^*$ for the degrees of Secs.~\ref{sec:res_ols}
+and~\ref{sec:res_ridge}: condition number $\kappa$ of the Hessian, iterations needed to reach the
+closed form to $10^{-6}$ (at most $10^{5}$), and, where this was not reached, the final distance
+(in parentheses). Ridge uses $\lb=10^{-2}$ and converges at every degree.}
+\label{tab:gd_degree}
+\begin{ruledtabular}
+\begin{tabular}{rllrr}
+ & \multicolumn{2}{c}{OLS} & \multicolumn{2}{c}{Ridge} \\
+$d$ & $\kappa$ & Iterations & $\kappa$ & Iterations \\
+\hline
+1 & 1.0 & 1 & 1.0 & 1 \\
+2 & 1.1 & 5 & 1.1 & 5 \\
+3 & 17 & 92 & 15.5 & 84 \\
+4 & 55 & 376 & 43.1 & 290 \\
+5 & 491 & 3057 & 178 & 1019 \\
+6 & $2.1\times10^{3}$ & 15253 & 269 & 1718 \\
+7 & $1.6\times10^{4}$ & $>10^5$ ($3.5\times10^{-6}$) & 375 & 2147 \\
+8 & $7.8\times10^{4}$ & $>10^5$ (0.90) & 434 & 2466 \\
+10 & $2.5\times10^{6}$ & $>10^5$ (28) & 573 & 3329 \\
+12 & $1.3\times10^{8}$ & $>10^5$ (190) & 716 & 4197 \\
+15 & $4.2\times10^{10}$ & $>10^5$ (670) & 939 & 5474 \\
+\end{tabular}
+\end{ruledtabular}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.485\textwidth}
+\caption{Iterations needed to reach the closed-form solution to $10^{-6}$ at degree 5, each method
+at its best learning rate $\eta$ on a grid of 16 values between $10^{-3}$ and 1, and the number
+$N$ of grid values for which the accuracy was reached. RMSprop never reached it; its distance
+stalls at $1.1\times10^{-3}$. The last line gives plain gradient descent at $\eta^*$, which is not
+on the grid.}
+\label{tab:optimisers}
+\begin{ruledtabular}
+\begin{tabular}{lcrccrc}
+ & \multicolumn{3}{c}{OLS} & \multicolumn{3}{c}{Ridge, $\lb=10^{-2}$} \\
+Method & $\eta$ & Iter. & $N$ & $\eta$ & Iter. & $N$ \\
+\hline
+Plain & 0.251 & 4369 & 4 & 0.251 & 1448 & 6 \\
+Momentum & 0.631 & 243 & 11 & 0.251 & 227 & 13 \\
+AdaGrad & 0.0398 & 5614 & 10 & 0.0631 & 1898 & 10 \\
+RMSprop &  & never & 0 &  & never & 0 \\
+Adam & 0.0158 & 465 & 16 & 0.0631 & 232 & 16 \\
+\hline
+Plain at $\eta^*$ & 0.359 & 3057 &  & 0.356 & 1019 &  \\
+\end{tabular}
+\end{ruledtabular}
+\end{minipage}
+\end{table*}
+
+Figure~\ref{fig:bv}(b) shows the cross-validated MSE of OLS. Five and ten folds give practically
+the same curve up to $d=11$, and both select $d=11$ (0.0211 and 0.0202). The curve is flat between
+$d=8$ and $d=11$ (0.020 to 0.025), so the degree is not sharply determined. Beyond $d=11$ the two
+curves separate: 0.043 against 0.029 at $d=12$, and 0.053 against 0.025 at $d=15$. With ten folds
+each model is trained on 90 points instead of 80. A low-degree fit hardly notices ten extra
+points; a high-degree fit is sensitive to them, and a single fold with an extreme prediction near
+the end of the interval can dominate the mean. The choice of $K$ changes how bad the high-degree
+models look, not which model is selected.
+
+For Ridge we cross-validate over the 15 degrees and the 23 penalties of Sec.~\ref{sec:res_ridge}.
+The lowest CV MSE is at $d=12$ for both values of $K$: 0.0209 at $\lambda=3.2\times10^{-5}$ for
+five folds and 0.0192 at $\lambda=10^{-5}$ for ten folds (the ten-fold grid is shown in
+Fig.~\ref{fig:final}). The region of low error is a broad diagonal valley: the higher the degree,
+the larger the penalty that is needed. The best Ridge values are only marginally below the best
+OLS values, by less than the standard error of the estimates (Sec.~\ref{sec:res_final}). What
+Ridge changes is the behaviour at high degree: at $d=15$ its best CV MSE is 0.022 and 0.020 for
+five and ten folds, against 0.053 and 0.025 for OLS.
+
+Do the bootstrap and cross-validation point to the same model complexity? They do not
+[Table~\ref{tab:selection} and Fig.~\ref{fig:bv}(c)]. At low degree the two estimates are
+similar, with the bootstrap somewhat higher (0.039 against 0.034 at $d=4$, 0.037 against 0.027
+at $d=6$), and both reject the low degrees. At high degree they diverge: the bootstrap error is
+0.18 at $d=10$ and 106 at $d=15$, while the CV error stays between 0.02 and 0.06. The bootstrap
+selects $d=6$, cross-validation $d=11$.
+
+The reason is the size of the effective training set. A bootstrap resample of 80 points contains
+on average about 51 distinct points, so the bootstrap estimates the error of a model trained on a
+much smaller sample. In this respect it behaves like cross-validation with fewer than three
+folds~\cite{hjorthjensen2026}, whereas five and ten folds train on 80 and 90 distinct points. The
+difference is largest where the fit is most sensitive to the number and the spacing of the points,
+that is at high degree. In addition, our bootstrap error rests on one test set of 20 points,
+whereas cross-validation tests each of the 100 points once. For choosing the degree we therefore
+trust cross-validation. The bootstrap answers a different question: it splits the error into bias
+and variance, which cross-validation cannot do, and thereby shows why the high degrees fail.
+
+\subsection{Gradient descent}\label{sec:res_gd}
+
+We now replace the closed forms by gradient descent on the 80 standardised training points.
+Unless stated otherwise the degree is 5, the degree of the starter code of the project
+description, and Ridge uses $\lb=10^{-2}$ ($\lambda=0.8$). The eigenvalues of the Hessian then
+range from $\lambda_{\min}=0.0113$ to $\lambda_{\max}=5.562$ for OLS ($\kappa=491$) and from
+0.0313 to 5.582 for Ridge ($\kappa=178$). Standardising pays off here as well: for the unscaled
+design matrix of the starter code $\kappa=2050$, four times larger.
+
+The analytical gradients agree with those of JAX to within $2\times10^{-16}$, the machine
+precision, for both costs. Used in Eq.~\eqref{eq:gd}, the two gradients give the same number of
+iterations and final parameters that differ by less than $10^{-15}$. At the optimal rate $\eta^*$
+(0.3588 for OLS and 0.3563 for Ridge) gradient descent reaches the closed-form solutions to
+$10^{-6}$ after 3057 and 1019 iterations. The contraction factor $(\kappa-1)/(\kappa+1)$ predicts
+about 3400 and 1200 iterations for a reduction of the error by $10^{6}$, and the ratio of the
+measured counts, 3.0, is close to the ratio of the condition numbers, 2.8. Gradient descent thus
+converges to the closed-form solution, but far more slowly than the single SVD that the closed
+form needs.
+
+\begin{figure*}[t]
+\includegraphics[width=\textwidth]{Figures/fig_optimisers_scan.pdf}
+\caption{Iterations needed to reach $\norm{\bm\theta_k-\hat{\bm\theta}}_2<10^{-6}$ against the
+learning rate for the five update rules at degree 5; OLS (left) and Ridge with $\lb=10^{-2}$
+(right). A missing point means that the accuracy was not reached within $2\times10^{4}$
+iterations or that the iteration diverged; RMSprop has no points. The vertical lines are the
+stability bounds of plain gradient descent, $2/\lambda_{\max}$, and of momentum,
+$2(1+\beta)/\lambda_{\max}$.}
+\label{fig:opt_scan}
+\end{figure*}
+
+Figure~\ref{fig:gd} shows the role of the learning rate. With $0.1\,\eta_{\max}$ the distance is
+still $7\times10^{-5}$ after $2\times10^{4}$ iterations; $0.5\,\eta_{\max}$ needs 6106
+iterations, $0.9\,\eta_{\max}$ 3390 and $\eta^*$ 3057; with $1.02\,\eta_{\max}$ the iteration
+diverges. On the logarithmic scale the curves are straight lines whose slope is set by the
+flattest direction of the cost, after a fast initial drop in which the steep directions are
+eliminated. The right panel confirms the bound of Eq.~\eqref{eq:etamax}: on a grid of 60 learning
+rates the largest value that converges is 0.3594 for OLS and 0.3581 for Ridge, against the
+predicted 0.3596 and 0.3583. The number of iterations falls as $\eta$ grows, is smallest just
+below the bound, and rises sharply at the bound, where the factor $1-\eta\lambda_{\max}$ of the
+steepest direction approaches $-1$. Because $\kappa$ is large, $\eta^*$ lies only 0.2\% below the
+bound: the fastest learning rate is next to divergence. The penalty shifts all eigenvalues up by
+$2\lb=0.02$, which hardly changes $\lambda_{\max}$ and the bound but nearly triples
+$\lambda_{\min}$, so Ridge needs about three times fewer iterations at every learning rate. The
+lecture notes show the same dependence of the iteration count on the learning rate for a model
+quadratic cost~\cite{hjorthjensen2026}.
+
+Table~\ref{tab:gd_degree} extends the comparison to the other degrees. The condition number of
+the OLS Hessian grows from 1 at $d=1$ to $2\times10^{3}$ at $d=6$ and $4\times10^{10}$ at $d=15$,
+and the iteration count grows in proportion to it (between 5 and 8 times $\kappa$ for $d=3$ to 6,
+of the order of the $\ln(10^{6})/2\approx7$ expected from the contraction factor). Within $10^{5}$
+iterations plain gradient descent reaches the OLS solution only up to $d=6$. At $d=7$ it is close;
+from $d=8$ on it stays far away. The directions it cannot reach are the weak singular modes of
+Fig.~\ref{fig:ridge_svd}, along which the OLS coefficients are largest. With the penalty the
+condition number stays below 1000 at every degree, and gradient descent converges for all degrees
+in at most 5474 iterations. Ridge therefore improves the conditioning as well as the variance. For
+OLS at high degree only the SVD solution is usable.
+
+\subsection{Momentum and adaptive learning rates}\label{sec:res_opt}
+
+Figure~\ref{fig:opt_scan} and Table~\ref{tab:optimisers} compare the five update rules on the
+same two problems, for 16 learning rates between $10^{-3}$ and 1 and at most $2\times10^{4}$
+iterations.
+
+Plain gradient descent works only in a narrow window of learning rates, bounded above by
+$2/\lambda_{\max}$ and below by slowness: it reaches the accuracy for 4 of the 16 values (OLS).
+Its best value on the grid, 4369 iterations at $\eta=0.251$, is higher than the 3057 iterations at
+$\eta^*$, because the grid does not contain $\eta^*=0.359$ and its next value, 0.398, already
+lies beyond the bound.
+
+Momentum is the fastest method: 243 iterations for OLS, more than 12 times fewer than plain
+gradient descent at $\eta^*$. This is the expected order of magnitude, since with well-chosen $\eta$ and
+$\beta$ the iteration count scales with $\sqrt\kappa$ instead of
+$\kappa$~\cite{polyak1964,hjorthjensen2026}, and $\sqrt{491}\approx22$. In
+Fig.~\ref{fig:opt_scan} the momentum curve runs parallel to that of plain gradient descent,
+shifted to learning rates ten times smaller, as expected for a velocity that builds up to
+$\eta/(1-\beta)=10\,\eta$ times the gradient along a flat direction. Momentum converges up to
+$\eta=0.63$, beyond the bound of plain gradient descent but below
+$2(1+\beta)/\lambda_{\max}=0.68$, and diverges at $\eta=1$.
+
+\begin{figure*}[t]
+\includegraphics[width=\textwidth]{Figures/fig_lasso_gd.pdf}
+\caption{Subgradient descent for the Lasso ($\lb=10^{-2}$, degree 5) with the five update rules.
+Left: distance to the Scikit-Learn reference solution after $2\times10^{4}$ iterations against the
+learning rate (a missing point means divergence). Right: distance against the iteration, each
+method at the learning rate with the smallest final distance.}
+\label{fig:lasso_gd}
+\end{figure*}
+
+\begin{table*}[t]
+\caption{Parameters of the standardised columns $x,\dots,x^5$, test MSE and number of parameters
+that are exactly zero for the three models at degree 5 (80 training and 20 test points of the base
+case). Ridge and Lasso use $\lb=10^{-2}$ in the normalised costs of Eqs.~\eqref{eq:gdcost}
+and~\eqref{eq:lassocost}. The last line is our subgradient solution with momentum after
+$2\times10^{4}$ iterations.}
+\label{tab:lasso}
+\begin{ruledtabular}
+\begin{tabular}{lrrrrrcc}
+Model & $\theta_1$ & $\theta_2$ & $\theta_3$ & $\theta_4$ & $\theta_5$ & Test MSE & Exact zeros \\
+\hline
+OLS (closed form) & $-0.0658$ & $-0.6952$ & 0.2279 & 0.4944 & $-0.1412$ & 0.0366 & 0 \\
+Ridge (closed form) & $-0.0202$ & $-0.5663$ & 0.0909 & 0.3703 & $-0.0535$ & 0.0393 & 0 \\
+Lasso (Scikit-Learn, coordinate descent) & 0.0000 & $-0.5544$ & 0.0158 & 0.3602 & 0.0000 & 0.0394 & 2 \\
+Lasso (own subgradient descent) & 0.0000 & $-0.5544$ & 0.0158 & 0.3602 & 0.0000 & 0.0394 & 0 \\
+\end{tabular}
+\end{ruledtabular}
+\end{table*}
+
+AdaGrad is slower than plain gradient descent at its best (5614 iterations). Its accumulated sum
+of squared gradients never decreases, so its effective learning rate decays like $1/\sqrt t$. It
+did not diverge for any learning rate on the grid, and for $\eta\ge0.04$ its iteration count
+hardly depends on $\eta$.
+
+RMSprop never reaches $10^{-6}$, for any learning rate and for either cost. Near the minimum the
+gradient and its running average shrink together, so the update becomes a step of fixed length
+$\eta$ that cannot shrink, and the iterate ends in a cycle around the minimum with an amplitude of
+the order of $\eta$. At the smallest learning rate, $10^{-3}$, the distance stalls at
+$1.1\times10^{-3}$.
+
+Adam reaches the accuracy for all 16 learning rates, in 465 iterations at best. Its step is
+bounded by about $\eta$ in every coordinate, so it does not diverge in the sense of
+Eq.~\eqref{eq:etamax}, and its averaged gradient $\hat{\bm m}_t$ cancels the sign changes of the
+gradient near the minimum, which lets it settle where RMSprop cannot. The learning rate still
+matters at small values, where the step length limits the speed (4501 iterations at
+$\eta=10^{-3}$); for $\eta\ge0.016$ the count stays near 500. The lecture notes report the same
+for their regression example: a limit cycle of RMSprop, and convergence of Adam for every learning
+rate between $10^{-3}$ and 1 with the best value in the middle of the
+range~\cite{hjorthjensen2026}.
+
+The Ridge penalty helps most the methods that suffer most from the ill-conditioning. Plain
+gradient descent and AdaGrad need 3.0 times fewer iterations, and Adam 2.0 times fewer. Momentum,
+which already handles the flat direction by building up speed, hardly changes, and RMSprop is not
+helped, since its problem is the fixed step length.
+
+\subsection{Lasso regression by subgradient descent}\label{sec:res_lasso}
+
+Applied to $|\theta|$, \texttt{jax.grad} returns $+1$ at $\theta=0$ (and $-1$ and $+1$ at
+$\theta=-0.3$ and $0.3$): JAX uses the rule of the branch $\theta\ge0$. This is a valid
+subgradient, since $+1$ lies in the subdifferential $[-1,1]$; so is the value 0 used in
+Eq.~\eqref{eq:lassograd}. The two are not equally useful. A fixed choice of $+1$ pushes a
+coefficient that sits at zero away from zero in one direction, whereas $\sign(0)=0$ leaves it
+there. We therefore use Eq.~\eqref{eq:lassograd} with the update rules of
+Sec.~\ref{sec:optimisers}, for $\lb=10^{-2}$ and degree 5. The reference is the coordinate-descent
+solution of Scikit-Learn with $\alpha=\lb/2$ and a tolerance of $10^{-12}$.
+
+\begin{figure*}[t]
+\includegraphics[width=\textwidth]{Figures/fig_sgd_batch.pdf}
+\caption{Excess cost $C(\bm\theta)-C(\hat{\bm\theta}_{\rm OLS})$ of minibatch SGD against the
+epoch for the batch sizes $M=1$, 5, 20 and 80 (full batch) and the five update rules, each with
+one constant learning rate $\eta$ (OLS, degree 5, 1000 epochs, 80 training points).}
+\label{fig:sgd_batch}
+\end{figure*}
+
+\begin{table*}[t]
+\begin{minipage}[t]{0.485\textwidth}
+\caption{Excess cost of SGD for OLS after 1000 epochs (median over the last 100 epochs), in units
+of $10^{-5}$, for the runs of Fig.~\ref{fig:sgd_batch}. $M=80$ is the full batch.}
+\label{tab:sgd_batch}
+\begin{ruledtabular}
+\begin{tabular}{lcrrrr}
+Method & $\eta$ & $M=1$ & $M=5$ & $M=20$ & $M=80$ \\
+\hline
+Plain & 0.02 & 380 & 12 & 6.9 & 190 \\
+Momentum & 0.002 & 350 & 4.3 & 6.9 & 190 \\
+AdaGrad & 0.1 & 0.71 & 1.4 & 2.1 & 0.66 \\
+RMSprop & 0.001 & 3.2 & 3.6 & 11 & 5.3 \\
+Adam & 0.005 & 110 & 9.5 & 1.1 & 0.00045 \\
+\end{tabular}
+\end{ruledtabular}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.485\textwidth}
+\caption{With and without SGD after 500 epochs: excess cost (median over the last 100 epochs) in
+units of $10^{-5}$. Full batch: 500 steps at the learning rate of Table~\ref{tab:optimisers};
+SGD: $M=5$ at the learning rate of Table~\ref{tab:sgd_batch}. Entries marked $\approx0$ are below
+$10^{-13}$ in absolute value.}
+\label{tab:sgd_full}
+\begin{ruledtabular}
+\begin{tabular}{lrrrr}
+ & \multicolumn{2}{c}{OLS} & \multicolumn{2}{c}{Ridge, $\lb=10^{-2}$} \\
+Method & Full batch & SGD & Full batch & SGD \\
+\hline
+Plain & 2.9 & 13 & 0.011 & 9.8 \\
+Momentum & $\approx0$ & 6.9 & $\approx0$ & 3.8 \\
+AdaGrad & 42 & 4.4 & 0.091 & 0.73 \\
+RMSprop & 770 & 15 & 410 & 1.4 \\
+Adam & $\approx0$ & 11 & $\approx0$ & 11 \\
+\end{tabular}
+\end{ruledtabular}
+\end{minipage}
+\end{table*}
+
+No method reaches a distance of $10^{-6}$ from the reference, so all runs are continued for
+$2\times10^{4}$ iterations (Fig.~\ref{fig:lasso_gd}). The smallest final distances are
+$5.0\times10^{-5}$ for momentum, $1.0\times10^{-4}$ for plain gradient descent,
+$2.0\times10^{-4}$ for AdaGrad, $4.0\times10^{-4}$ for Adam and $8.2\times10^{-4}$ for RMSprop;
+the costs exceed the reference cost by less than $10^{-5}$. The reason is the kink of the
+penalty. For a coefficient whose optimum is zero, the subgradient contributes $+\lb$ when the
+coefficient is slightly positive and $-\lb$ when it is slightly negative, so every step pushes it
+across zero by about $\eta\lb$. The gradient does not vanish at the solution, as it does for the
+smooth costs, and the distance levels off at a value set by the learning rate. For plain gradient
+descent $\eta\lb=6\times10^{-5}$ at its best learning rate, against a final distance of
+$1.0\times10^{-4}$.
+
+The learning rate therefore trades speed against accuracy (left panel of
+Fig.~\ref{fig:lasso_gd}). At small $\eta$ a method has not yet arrived after $2\times10^{4}$
+steps, and a larger $\eta$ helps; once it has arrived it oscillates by about $\eta\lb$, and a
+larger $\eta$ hurts. Plain gradient descent and AdaGrad show both branches, with minima at
+$\eta=0.0063$ and 0.01. Momentum, Adam and RMSprop arrive even at the smallest learning rates of
+the grid, so mainly the rising branch is visible. In the right panel RMSprop arrives first
+(distance below $10^{-3}$ after 832 iterations) but then oscillates in a band between about
+$10^{-3}$ and $5\times10^{-3}$; Adam follows after 3241 iterations and oscillates between about
+$10^{-4}$ and $2\times10^{-3}$; momentum settles lowest. Unlike for the smooth costs, Adam no
+longer settles: the subgradient keeps switching between $+\lb$ and $-\lb$ near zero, so the
+averaging that damps its steps near a smooth minimum does not remove them.
+
+Table~\ref{tab:lasso} compares the three models at degree 5. OLS uses all five powers. Ridge
+shrinks all of them and sets none to zero. The Lasso sets the coefficients of $x$ and $x^5$
+exactly to zero, shrinks that of $x^3$ to 0.016 and keeps $x^2$ and $x^4$: it selects the even
+powers, as the symmetry of $f$ suggests. Our subgradient solution agrees with the reference to
+four decimals in every coefficient and in the test MSE, but it has no exact zeros (the
+coefficients of $x$ and $x^5$ end at $4\times10^{-5}$ and $2\times10^{-5}$). The test MSE is
+0.0366 for OLS and 0.0393 and 0.0394 for Ridge and Lasso: at degree 5 there is little variance to
+remove, and the penalties mainly add bias. Subgradient descent with a fixed learning rate is thus
+a poor Lasso solver. Its accuracy is limited by the learning rate, and it does not produce the
+exact zeros that are the purpose of the Lasso; coordinate descent with soft thresholding does
+both.
+
+\subsection{Stochastic gradient descent}\label{sec:res_sgd}
+
+We now use minibatches of $M=1$, 5, 20 and 80 points; $M=80$ is the full batch, that is, no SGD.
+Each update rule uses one constant learning rate for all $M$ (Table~\ref{tab:sgd_batch}), chosen
+so that $M=1$ does not diverge: the cost of a single data point has a curvature of up to
+$2\norm{\bm x_i}^2=92$, so plain SGD needs $\eta<2/92=0.022$.
+
+Figure~\ref{fig:sgd_batch} and Table~\ref{tab:sgd_batch} show the excess cost for OLS over 1000
+epochs. The batch size is a tradeoff. A small batch makes many updates per epoch and progresses
+fastest at first: after 10 epochs $M=1$ is ahead for every method. But its gradient noise does
+not vanish near the minimum, where the full gradient goes to zero while the gradients of single
+points do not. With a constant learning rate the iterate therefore ends on a noisy plateau, at an
+excess cost of about $4\times10^{-3}$ for plain SGD and momentum and $10^{-3}$ for Adam at $M=1$.
+A larger batch lowers the plateau but makes fewer updates per epoch. For plain SGD and momentum an
+intermediate batch ($M=5$ or 20) is best after 1000 epochs, while the full batch, restricted to a
+learning rate that was chosen for $M=1$, is still far from converged. For Adam the plateau falls
+with the batch size, and the full batch converges to $4.5\times10^{-9}$. AdaGrad depends least on
+$M$: its built-in decay of the step acts like a schedule that also reduces the noise. RMSprop is
+slow for every batch size, because its steps have a length of about $\eta=10^{-3}$. More epochs
+do not lower the plateaus of the SGD runs with a constant learning rate; only the full-batch
+runs, which have no noise, keep descending.
+
+\begin{figure}[t]
+\includegraphics[width=\linewidth]{Figures/fig_sgd_schedule.pdf}
+\caption{Plain SGD with $M=5$ (OLS, degree 5): excess cost against the epoch for two constant
+learning rates and for four schedules $\eta_t=t_0/(t+t_1)$, Eq.~\eqref{eq:schedule}, which all
+start at $\eta_0=0.05$.}
+\label{fig:sgd_schedule}
+\end{figure}
+
+\begin{figure*}[t]
+\includegraphics[width=\textwidth]{Figures/fig_final_cv.pdf}
+\caption{Final model selection with 10-fold cross-validation ($n=100$, $\sigma=0.1$). Left: CV
+MSE against the degree for OLS, and for Ridge and Lasso at the best penalty for each degree.
+Middle and right: $\log_{10}$ of the CV MSE on the grid of degree and penalty, for Ridge
+[$\lambda$ of Eq.~\eqref{eq:ridgecost}] and for the Lasso [$\lb$ of Eq.~\eqref{eq:lassocost}].
+Stars mark the lowest CV MSE. White crosses mark Lasso fits that did not converge; they are
+excluded from the selection.}
+\label{fig:final}
+\end{figure*}
+
+\begin{table*}[t]
+\begin{minipage}[t]{0.485\textwidth}
+\caption{Model selected for each method by 10-fold cross-validation ($n=100$, $\sigma=0.1$), with
+the standard error (SE) of the CV estimate. The penalty is $\lambda$ for Ridge and $\lb$ for the
+Lasso (converged fits only).}
+\label{tab:best}
+\begin{ruledtabular}
+\begin{tabular}{lcccc}
+Method & Degree & Penalty & CV MSE & SE \\
+\hline
+OLS & 11 &  & 0.0202 & 0.0031 \\
+Ridge & 12 & $10^{-5}$ & 0.0192 & 0.0026 \\
+Lasso & 8 & $10^{-4}$ & 0.0221 & 0.0021 \\
+\end{tabular}
+\end{ruledtabular}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.485\textwidth}
+\caption{Bootstrap error, measured bias$^2$ and variance, Eq.~\eqref{eq:bootest}, of the three
+methods at two degrees, with the split and the resamples of Fig.~\ref{fig:bv}(a) ($B=100$). Ridge
+and Lasso use the penalty with the lowest CV MSE at that degree.}
+\label{tab:bv_methods}
+\begin{ruledtabular}
+\begin{tabular}{clcccc}
+$d$ & Method & Penalty & Error & Bias$^2$ & Variance \\
+\hline
+5 & OLS &  & 0.0406 & 0.0362 & 0.0044 \\
+5 & Ridge & 0.32 & 0.0396 & 0.0371 & 0.0026 \\
+5 & Lasso & $3.2\times10^{-3}$ & 0.0387 & 0.0361 & 0.0026 \\
+12 & OLS &  & 0.7897 & 0.0612 & 0.7285 \\
+12 & Ridge & $10^{-5}$ & 0.1556 & 0.0400 & 0.1156 \\
+12 & Lasso & $3.2\times10^{-4}$ & 0.0412 & 0.0262 & 0.0150 \\
+\end{tabular}
+\end{ruledtabular}
+\end{minipage}
+\end{table*}
+
+A decaying learning rate removes the plateau (Fig.~\ref{fig:sgd_schedule}, plain SGD with
+$M=5$). A constant $\eta=0.05$ is fast at first but stays in a noisy band around
+$1.2\times10^{-3}$; a constant $\eta=0.01$ is slower but reaches $1.6\times10^{-5}$ after 2000
+epochs. The four schedules of Eq.~\eqref{eq:schedule} all start at $\eta_0=0.05$ and differ in
+the number of updates $t_1$ after which they decay (there are 16 updates per epoch). The decay
+time decides the outcome: the final excess cost is $9.2\times10^{-3}$, $6.0\times10^{-4}$,
+$5.1\times10^{-5}$ and $9.5\times10^{-7}$ for $t_1=20$, 100, 400 and 2000. With $t_1=20$ the
+learning rate decays after about one epoch, and the iterate freezes far from the minimum.
+Neglecting the noise, the error along an eigendirection of curvature $\lambda_i$ is multiplied by
+$\prod_t(1-\eta_t\lambda_i)\approx[(T+t_1)/t_1]^{-t_0\lambda_i}$ after $T$ updates, a power law
+instead of the exponential decay at constant rate. For the flattest direction and the
+$T=32\,000$ updates of our runs this factor is 0.92, 0.72, 0.37 and 0.04 for the four schedules.
+The conditions of Robbins and Monro~\cite{robbins1951}, $\sum_t\eta_t=\infty$ and
+$\sum_t\eta_t^2<\infty$, express two needs: the steps must not shrink so fast that the minimum
+cannot be reached, and they must shrink eventually so that the noise dies out. Every schedule of
+the form of Eq.~\eqref{eq:schedule} satisfies them for an infinite run. In a finite run the
+constants decide. With $t_1=20$ the sum of the steps is too short in practice, whereas the last
+schedule, which keeps $\eta_0$ for about 125 epochs before it decays, meets both needs and gives
+the lowest excess cost of all runs.
+
+Table~\ref{tab:sgd_full} compares every method with and without SGD after 500 epochs, which is
+the same arithmetic in both cases. Full-batch momentum and Adam reach the closed-form solutions to
+rounding accuracy. Plain gradient descent has not converged after 500 steps, and AdaGrad and
+RMSprop are slower still, at learning rates that were selected for runs of $2\times10^{4}$
+iterations. With SGD every method stops at its noise level, an excess cost between
+$4\times10^{-5}$ and $1.5\times10^{-4}$ for OLS and between $7\times10^{-6}$ and
+$1.1\times10^{-4}$ for Ridge. SGD reaches the closed forms only up to this level; it is better
+than the full batch only where the full-batch learning rate was a poor choice for a short run.
+
+The measured time per epoch on our computer was 0.36~ms for $M=1$, 0.081~ms for $M=5$, 0.027~ms
+for $M=20$ and 0.014~ms for the full batch. Although an epoch costs the same arithmetic for every
+$M$, SGD with single points is about 25 times slower in practice, because the overhead of each
+update in the Python loop exceeds the arithmetic of a gradient over a few points. For $n=80$ and
+five parameters SGD therefore brings no advantage: a full gradient is cheap, full-batch momentum
+or Adam reach the closed form in a few hundred iterations, and SGD needs a tuned learning rate or
+schedule and still stops at a noise level. Its advantage appears when $n$ is large, where one
+epoch of SGD makes $n/M$ useful updates for the cost of a single full gradient.
+
+\subsection{Final model selection}\label{sec:res_final}
+
+We finally select a model for each of the three methods by 10-fold cross-validation on all 100
+points, with the pipelines of Sec.~\ref{sec:resampling}. OLS is scanned over the degrees 1 to 15,
+Ridge over the same degrees and the 23 penalties $\lambda$ between $10^{-8}$ and $10^{3}$, and
+the Lasso over the degrees and 13 penalties $\lb$ between $10^{-6}$ and 1. OLS and Ridge are
+solved exactly; the Lasso is solved by the coordinate descent of Scikit-Learn with at most
+$10^{5}$ iterations. We record whether the Lasso solver converged in every fold. It did not in
+34 of the 195 cells, all at degrees 9 to 15 and $\lb\le10^{-4}$, where the nearly collinear
+columns slow the solver down as they slowed gradient descent in Table~\ref{tab:gd_degree}. An
+unconverged fit is not the Lasso solution, since stopping early acts as an additional,
+uncontrolled regularisation. Such cells are marked in Fig.~\ref{fig:final} and excluded from the
+selection. The check matters: the lowest CV MSE of the whole Lasso grid (0.0200, at $d=15$ and
+$\lb=3.2\times10^{-6}$) belongs to an unconverged cell.
+
+Table~\ref{tab:best} lists the selected models. Ridge at $d=12$ and $\lambda=10^{-5}$ has the
+lowest CV MSE, followed by OLS at $d=11$ and the Lasso at $d=8$. The standard errors of these
+estimates are 0.002 to 0.003, so the three methods differ by about one standard error or less:
+the data do not single out one of them. All three errors are about twice $\sigma^2=0.01$. Part of
+this excess is specific to our sample, whose realised noise is larger than its expectation
+(variance 0.0150 in the training points, Sec.~\ref{sec:res_ols}); the rest is the bias and the
+variance of the fitted polynomials.
+
+The left panel of Fig.~\ref{fig:final} shows where the methods differ. Up to $d=9$ the three
+curves coincide, because at low degree there is little variance and a penalty has nothing to
+remove. Beyond that the OLS error rises irregularly (0.060 at $d=13$), while the Ridge and Lasso
+errors stay flat, at 0.019 to 0.020 and at 0.023 to 0.025. The value of the penalties for this
+problem is not a lower error but a result that no longer depends on the degree. The Lasso curve
+lies above the Ridge curve at high degree. Since its fits with small penalties did not converge
+there and were excluded, we cannot tell whether this is a property of the Lasso or of the solver.
+
+Which term of Eq.~\eqref{eq:biasvar} does each method act on? OLS has no penalty: it lowers the
+bias by raising the degree and pays with variance. Ridge and Lasso reduce the variance at the
+price of some bias, Ridge by shrinking the weakly determined singular directions and the Lasso by
+shrinking and removing coefficients. To test this reading we repeated the bootstrap of
+Sec.~\ref{sec:res_bv} with the three pipelines at $d=5$ and $d=12$
+(Table~\ref{tab:bv_methods}). At $d=12$, where OLS is dominated by variance, Ridge reduces the
+variance by a factor of 6 and the Lasso by a factor of 50, and the error falls from 0.79 to 0.16
+and 0.04. At $d=5$, where the variance is already small, the penalties lower it only from 0.0044
+to 0.0026, the measured bias stays the same or rises slightly, and the error hardly changes. The
+numbers support the reading that the penalties act on the variance. The comparison of the biases
+at $d=12$ is less clean, because the measured bias of OLS is itself inflated there
+(Sec.~\ref{sec:res_bv}).
+
+In summary, OLS has an exact closed form and a single hyperparameter, the degree, but at high
+degree it is unstable, so the degree must be chosen with care. Ridge has a closed form for every
+$\lambda$, is stable at any degree because it removes the weakest singular directions, improves
+the conditioning for gradient descent, and has the lowest CV error here; it has two
+hyperparameters and, since it sets no coefficient to zero, does not show which powers matter. The
+Lasso selects powers and reduces the variance strongly, but it has no closed form, and both our
+subgradient method (no exact zeros) and coordinate descent (no convergence at high degree)
+struggle with the collinear columns, so its optimum at high degree remains uncertain.
+
+\begin{table*}[t]
+\begin{minipage}[t]{0.485\textwidth}
+\caption{Level of LLM contribution to the text of each section (0 none, 1 language only, 2
+editorial, 3 generative).}
+\label{tab:llm_text}
+\begin{ruledtabular}
+\begin{tabular}{p{0.30\linewidth}cp{0.50\linewidth}}
+\rr Section & Level & \rr Notes \\
+\hline
+\rr Abstract & 3 & \rr drafted from the results of the notebook \\
+\rr Introduction & 3 & \rr drafted along the course guide on report writing \\
+\rr Methods & 3 & \rr drafted from the theory cells of the notebook and the lecture notes \\
+\rr Implementation and tests & 3 & \rr drafted from the code and its printed checks \\
+\rr Results and discussion & 3 & \rr drafted from the outputs and the observation cells of the notebook \\
+\rr Conclusion & 3 & \rr drafted from the results and the caveats noted in the notebook \\
+\rr This appendix & 3 & \rr drafted from the LLM notes in the notebook \\
+\end{tabular}
+\end{ruledtabular}
+\end{minipage}\hfill
+\begin{minipage}[t]{0.485\textwidth}
+\caption{Level of LLM contribution to the code (0 none, 1 debugging, 2 snippet, 3 skeleton, 4
+substantial).}
+\label{tab:llm_code}
+\begin{ruledtabular}
+\begin{tabular}{p{0.36\linewidth}cp{0.44\linewidth}}
+\rr File & Level & \rr Description \\
+\hline
+\rr \nbfile, parts a) to i) & 4 & \rr Claude wrote the code cells of all parts, starting from the course
+notebooks of weeks 35 to 38 and the starter cells of the project description, as stated above
+every cell. The functions \texttt{runge}, \texttt{MSE}, \texttt{R2}, \texttt{ridge\_svd},
+\texttt{optimiser\_step}, \texttt{make\_batches} and \texttt{step\_length} are course code to
+which comments were added. \\
+\rr \texttt{export\_figures.py} & 4 & \rr Script written by Claude that executes the notebook unchanged
+and saves its figures as PDF at the size of the report. \\
+\end{tabular}
+\end{ruledtabular}
+\end{minipage}
+\end{table*}
+
+\section{Conclusion}\label{sec:conclusion}
+
+We fitted Runge's function with polynomials of degree up to 15 to 100 noisy points. The error of
+OLS on new data is lowest at an intermediate degree, 11 according to cross-validation, with a
+shallow minimum of about 0.02. The bootstrap shows why. The bias falls with the degree, while the
+variance grows by almost four orders of magnitude between degree 6 and degree 15, because the
+monomials are nearly collinear and the fit amplifies the noise along the weak singular directions
+of the design matrix. The bootstrap itself selects degree 6, since its resamples contain only 63\%
+of the distinct points, which penalises the flexible models. Ridge removes the weak directions one
+after another as the penalty grows, and the Lasso sets coefficients exactly to zero. Both reduce
+the variance and make the cross-validated error flat in the degree, but their best errors (0.019
+and 0.022) are within about one standard error of the best OLS error (0.020). Gradient descent
+reproduces the closed-form solutions as long as the condition number allows it: at the optimal
+learning rate it needs 3057 iterations at degree 5, it fails beyond degree 6 for OLS, and it
+converges at every degree with a small Ridge penalty. Momentum is more than 12 times faster, Adam is
+the least sensitive to the learning rate, and RMSprop with a constant learning rate does not converge.
+
+Several limitations qualify these results. All data come from one seed. The curves of
+Secs.~\ref{sec:res_ols} and~\ref{sec:res_ridge} rest on a single split with 20 test points, and
+where a degree or a penalty was selected on that test set the quoted error is optimistic. We did
+not repeat the analysis over many seeds, so the bootstrap curves have no error bars, and the
+standard errors of the cross-validation (0.002 to 0.003) are as large as the differences between
+the three methods: our ranking of OLS, Ridge and Lasso is not statistically resolved. The
+bootstrap estimate of the bias is contaminated at high degree by the finite number of resamples,
+and the bootstrap error itself is pessimistic there. For the Lasso our own code is a subgradient
+method that produces no exact zeros, and in the final selection 34 cells of the grid had to be
+excluded because the library solver did not converge, so the optimum of the Lasso at high degree
+is unknown. The optimisers were compared at one degree, on one grid of 16 learning rates and with
+standard values of their other hyperparameters; the best learning rate of plain gradient descent
+on that grid needs 43\% more iterations than the optimal one, which shows how much the grid
+matters. Convergence was measured against the closed-form solution, which is not available in
+practice, and the learning rates for SGD were chosen for stability at $M=1$, not tuned for each
+batch size. The computing times depend on the machine. Finally, we relied on Scikit-Learn for
+cross-validation and did not write our own $K$-fold code.
+
+Two extensions follow directly from these limitations. The ill-conditioning that limits gradient
+descent, coordinate descent and the bootstrap is a property of the monomial basis, not of the
+problem. Replacing the powers $x^j$ by orthogonal polynomials, such as the Legendre or Chebyshev
+polynomials, should reduce the condition number of the design matrix by many orders of magnitude
+and make the iterative solvers usable at high degree. For the Lasso, a proximal gradient method,
+in which every gradient step on the squared error is followed by soft thresholding, would give
+exact zeros with our own code and allow a fair comparison with coordinate descent. With these two
+changes the analysis could be repeated over many independent data sets, which is possible here
+because $f$ is known, in order to obtain the true bias and variance and to measure how far the
+bootstrap estimates are from them.
+
+Beyond the results, the project changed how we would work next time. The most practical lesson
+concerned conventions. The same penalty takes different numerical values in the closed-form Ridge
+solution, in the cost normalised by $1/n$ that gradient descent minimises, and in the Lasso of
+Scikit-Learn, and only the comparison with a closed-form solution made these factors visible. We
+also learned not to trust a single test split: for the same data the single split, the bootstrap
+and cross-validation selected degrees 8, 6 and 11. A library solver needs the same checks as our
+own code, since the lowest Lasso error of the whole grid came from fits that had not converged.
+We would now write the tests before the analysis and plan repeated runs over several seeds from
+the start.
+
+\appendix
+
+\section{Use of AI/LLM tools}\label{app:llm}
+
+This declaration follows the guidelines of the course~\cite{llmguidelines}.
+
+\subsection*{A.1 Tools used}
+
+Claude (Claude Opus 5.5, accessed through claude.ai, September and October 2026).
+
+\subsection*{A.2 Text writing and editing}
+
+Table~\ref{tab:llm_text} gives the contribution level for every section. All sections are at
+Level 3 (generative).
+
+\emph{Prompt and process (Level 3).} We gave Claude our notebook with all its outputs, the
+project description and the course material on report writing (grading form, writing guide,
+\LaTeX{} template and the LLM guidelines). We asked it to write this report in \LaTeX{} according
+to those criteria and to check every paragraph against the other sections, the course material and
+the results. The theory cells and the observation cells of the notebook, which the Methods and
+Results sections follow, had themselves been drafted with Claude in September, from the outputs of
+our code and from our follow-up questions. In the same session Claude executed the notebook again,
+exported its figures as PDF at the size of this report, and compared the numbers in the text with
+the printed outputs. The numerical results in this report are outputs of the notebook. A few
+quantities derived from them were computed by Claude: the ratios quoted in the text, the iteration
+counts expected from the condition number (Sec.~\ref{sec:res_gd}), the decay factors of the
+schedules (Sec.~\ref{sec:res_sgd}) and the estimate of the resampling contribution to the measured
+bias (Sec.~\ref{sec:res_bv}).
+
+\subsection*{A.3 Code generation and assistance}
+
+Table~\ref{tab:llm_code} gives the contribution level for every code file.
+
+\emph{Prompt and verification (Level 4).} For each part we gave Claude the project text and the
+course notebook of the corresponding week and asked it to adapt the course code to our problem and
+to explain every line. We ran every cell ourselves and verified the results against NumPy,
+Scikit-Learn and the closed-form solutions (Table~\ref{tab:tests}). In the notebook every function
+to which the LLM contributed carries an \texttt{LLM-assisted} tag in its docstring, and every code
+cell is preceded by a markdown note that states its source in the course material and the level of
+assistance.
+
+\emph{Our changes and checks.} We went through the text and the code, asked Claude for further
+explanations wherever something was unclear, and cross-checked the content against the lecture
+material. These follow-up questions shaped both the text and the code.
+
+\bibliography{biblio}
+
+\end{document}
